@@ -1,0 +1,88 @@
+import "dotenv/config";
+import express from "express";
+import { createServer } from "http";
+import net from "net";
+import { createExpressMiddleware } from "@trpc/server/adapters/express";
+import { registerOAuthRoutes } from "./oauth";
+import { appRouter } from "../routers";
+import { createContext } from "./context";
+import { serveStatic } from "./vite";
+import { registerSitemapRoute } from "../sitemap";
+
+function isPortAvailable(port: number): Promise<boolean> {
+  return new Promise(resolve => {
+    const server = net.createServer();
+    server.listen(port, () => {
+      server.close(() => resolve(true));
+    });
+    server.on("error", () => resolve(false));
+  });
+}
+
+async function findAvailablePort(startPort: number = 3000): Promise<number> {
+  for (let port = startPort; port < startPort + 20; port++) {
+    if (await isPortAvailable(port)) {
+      return port;
+    }
+  }
+  throw new Error(`No available port found starting from ${startPort}`);
+}
+
+export function createApp() {
+  const app = express();
+  // Configure body parser with larger size limit for file uploads
+  app.use(express.json({ limit: "50mb" }));
+  app.use(express.urlencoded({ limit: "50mb", extended: true }));
+  // OAuth callback under /api/oauth/callback
+  registerOAuthRoutes(app);
+  // Sitemap
+  registerSitemapRoute(app);
+  // tRPC API
+  app.use(
+    "/api/trpc",
+    createExpressMiddleware({
+      router: appRouter,
+      createContext,
+    })
+  );
+  return app;
+}
+
+async function startServer() {
+  const app = createApp();
+  const server = createServer(app);
+
+  // development mode uses Vite, production mode uses static files
+  if (process.env.NODE_ENV === "development" || !process.env.NODE_ENV) {
+    console.log("Setting up Vite...");
+    const { setupVite } = await import("./vite");
+    await setupVite(app, server);
+    console.log("Vite setup complete.");
+  } else {
+    serveStatic(app);
+  }
+
+  const preferredPort = parseInt(process.env.PORT || "3000");
+  console.log(`Finding available port starting from ${preferredPort}...`);
+  const port = await findAvailablePort(preferredPort);
+
+  if (port !== preferredPort) {
+    console.log(`Port ${preferredPort} is busy, using port ${port} instead`);
+  }
+
+  server.listen(port, () => {
+    console.log(`Server running on http://localhost:${port}/`);
+  });
+}
+
+// Only start server if run directly
+import { fileURLToPath } from "url";
+const __filename = fileURLToPath(import.meta.url);
+console.log("Checking Entry Point:");
+console.log("process.argv[1]:", process.argv[1]);
+console.log("__filename:     ", __filename);
+
+if (process.argv[1] === __filename || process.argv[1].endsWith('index.ts')) {
+  console.log("Starting server...");
+  startServer().catch(console.error);
+}
